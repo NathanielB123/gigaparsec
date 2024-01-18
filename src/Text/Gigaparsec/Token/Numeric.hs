@@ -1,5 +1,6 @@
 {-# LANGUAGE Safe #-}
 {-# LANGUAGE DataKinds, KindSignatures, ConstraintKinds, MultiParamTypeClasses, AllowAmbiguousTypes, FlexibleInstances, FlexibleContexts, UndecidableInstances, ApplicativeDo, TypeFamilies, TypeOperators, CPP #-}
+{-# LANGUAGE PolyKinds #-}
 -- TODO: refine, move to Internal
 module Text.Gigaparsec.Token.Numeric (module Text.Gigaparsec.Token.Numeric) where
 
@@ -24,7 +25,7 @@ import Control.Monad (when, unless)
 
 #if __GLASGOW_HASKELL__ >= 904
 
-import GHC.TypeLits (type (<=?), Nat)
+import GHC.TypeLits (type (<=?), Nat, Symbol)
 import GHC.TypeError (TypeError, ErrorMessage(Text, (:<>:), ShowType), Assert)
 
 #else
@@ -38,55 +39,84 @@ type family Assert b c where
 
 #endif
 
+-- Utility - I wonder if a library has this utility defined anywhere?
+type (==?) :: forall a. a -> a -> Bool 
+type family x ==? y where
+  x ==? x = 'True
+  _ ==? _ = 'False
+
 type Bits :: *
 data Bits = B8 | B16 | B32 | B64
 
-type BitWidth :: * -> Bits
-type family BitWidth t where
-  BitWidth Integer = 'B64
-  BitWidth Int     = 'B64
-  BitWidth Word    = 'B64
-  BitWidth Word64  = 'B64
-  BitWidth Natural = 'B64
-  BitWidth Int32   = 'B32
-  BitWidth Word32  = 'B32
-  BitWidth Int16   = 'B16
-  BitWidth Word16  = 'B16
-  BitWidth Int8    = 'B8
-  BitWidth Word8   = 'B8
-  BitWidth a       
-        = TypeError ('Text "The type '" ' :<>: 'ShowType a 
-   ' :<>: 'Text "' is not a numeric type supported by Gigaparsec")
+type NumLexable :: * -> Constraint
+class Num a => NumLexable a where
+  type BitWidth a :: Bits
+  type IsSigned a :: Signedness
+
+instance NumLexable Integer where
+  type BitWidth Integer = 'B64
+  type IsSigned Integer = 'Signed
+
+instance NumLexable Int where
+  type BitWidth Int = 'B64
+  type IsSigned Int = 'Signed
+
+instance NumLexable Int64 where
+  type BitWidth Int64 = 'B64
+  type IsSigned Int64 = 'Signed
+
+instance NumLexable Word where
+  type BitWidth Word = 'B64
+  type IsSigned Word = 'Unsigned
+
+instance NumLexable Word64 where
+  type BitWidth Word64 = 'B64
+  type IsSigned Word64 = 'Unsigned
+
+instance NumLexable Natural where
+  type BitWidth Natural = 'B64
+  type IsSigned Natural = 'Unsigned
+
+instance NumLexable Int32 where
+  type BitWidth Int32 = 'B32
+  type IsSigned Int32 = 'Signed
+
+instance NumLexable Word32 where
+  type BitWidth Word32 = 'B32
+  type IsSigned Word32 = 'Unsigned
+
+instance NumLexable Int16 where
+  type BitWidth Int16 = 'B16
+  type IsSigned Int16 = 'Signed
+
+instance NumLexable Word16 where
+  type BitWidth Word16 = 'B16
+  type IsSigned Word16 = 'Unsigned
+
+instance NumLexable Int8 where
+  type BitWidth Int8 = 'B8
+  type IsSigned Int8 = 'Signed
+
+instance NumLexable Word8 where
+  type BitWidth Word8 = 'B8
+  type IsSigned Word8 = 'Unsigned
 
 type Signedness :: *
 data Signedness = Signed | Unsigned
 
-type IsSigned :: * -> Signedness -> Constraint
-type family IsSigned t s where
-  IsSigned Integer 'Signed   = ()
-  IsSigned Int     'Signed   = ()
-  IsSigned Word    'Unsigned = ()
-  IsSigned Word64  'Unsigned = ()
-  IsSigned Natural 'Unsigned = ()
-  IsSigned Int32   'Signed   = ()
-  IsSigned Word32  'Unsigned = ()
-  IsSigned Int16   'Signed   = ()
-  IsSigned Word16  'Unsigned = ()
-  IsSigned Int8    'Signed   = ()
-  IsSigned Word8   'Unsigned = ()
-  IsSigned a       'Signed
-      = TypeError ('Text "The type '" ' :<>: 'ShowType a ' :<>: 'Text "' does not hold signed data")
-  IsSigned a       'Unsigned     
-        = TypeError ('Text "The type '" ' :<>: 'ShowType a 
-   ' :<>: 'Text "' does not hold unsigned data")
+type ShowSignedness :: Signedness -> Symbol
+type family ShowSignedness s where
+  ShowSignedness 'Signed   = "signed"
+  ShowSignedness 'Unsigned = "unsigned" 
 
 type ShowBits :: Bits -> ErrorMessage
 type ShowBits b = 'ShowType (BitsNat b)
 
--- This is intentionally not a type alias. On GHC versions < 9.4.1 it appears that TypeErrors are
+-- These are intentionally not type aliases. On GHC versions < 9.4.1 it appears that TypeErrors are
 -- reported slightly more eagerly and we get an error on this definition because 
 -- > BitsNat b <=? BitsNat (BitWidth t)
--- cannot be solved
+-- cannot be solved (so the type expression gets stuck and a TypeError is left in the RHS type 
+-- expression)
 type SatisfiesBound :: * -> Bits -> Constraint
 type family SatisfiesBound t b where
   SatisfiesBound t b 
@@ -94,6 +124,13 @@ type family SatisfiesBound t b where
    ' :<>: 'ShowType t  ' :<>: 'Text "' does not have enough bit-width to store " 
    ' :<>: ShowBits (BitWidth t) ' :<>: 'Text " bits of data (can only store up to " 
    ' :<>: ShowBits b ' :<>: 'Text " bits)."))
+
+type SatisfiesSignedness :: * -> Signedness -> Constraint
+type family SatisfiesSignedness t s where
+  SatisfiesSignedness t s 
+         = Assert (IsSigned t ==? s) (TypeError ('Text "The type '" ' :<>: 'ShowType t 
+    ' :<>: 'Text "' does not hold " ' :<>: 'Text (ShowSignedness s) ' :<>: 'Text " data"))
+
 
 type BitBounds :: Bits -> Constraint
 class BitBounds b where
@@ -129,11 +166,13 @@ instance BitBounds 'B64 where
 
 type CanHoldSigned :: Bits -> * -> Constraint
 class (BitBounds b, Num a) => CanHoldSigned b a where
-instance (BitBounds b, Num a, IsSigned a 'Signed, SatisfiesBound a b) => CanHoldSigned b a
+instance (BitBounds b, NumLexable a, SatisfiesSignedness a 'Signed, SatisfiesBound a b) 
+      => CanHoldSigned b a
 
 type CanHoldUnsigned :: Bits -> * -> Constraint
 class (BitBounds b, Num a) => CanHoldUnsigned b a where
-instance (BitBounds b, Num a, IsSigned a 'Unsigned, SatisfiesBound a b) => CanHoldUnsigned b a
+instance (BitBounds b, NumLexable a, SatisfiesSignedness a 'Unsigned, SatisfiesBound a b) 
+      => CanHoldUnsigned b a
 
 type IntegerParsers :: (Bits -> * -> Constraint) -> *
 data IntegerParsers canHold = IntegerParsers { decimal :: Parsec Integer
